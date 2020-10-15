@@ -1,3 +1,4 @@
+import asyncio
 import collections
 import discord
 import random
@@ -115,10 +116,10 @@ class DraftClient(discord.Client):
         lines = [
             "Players will be queued up for consideration in a random order.",
             "When a player is up for bidding, I will ask you for your bids privately.",
-            "A captain who makes a larger positive bid will secure the player at that price.",
-            "Ties winning bids are broken randomly."
-            "If neither captain bids above $0, the player is placed at the back of the queue.",
-            "If both captains reach $0, the remaining players are randomly assigned."
+            "Obviously, you may not bid higher than your current currency.",
+            "A captain who makes a larger nonnegative bid will secure the player at that price.",
+            "Ties in winning bids ($0 or above) are broken randomly."
+            "If neither captain bids $0 or above, the player is placed at the back of the queue."
         ]
         return "\n".join(lines)
 
@@ -194,14 +195,15 @@ class DraftClient(discord.Client):
             elif len(self.players) < self.settings["n_captains"] * self.settings["n_picks"]:
                 await self.react_thumbs_down(message)
                 min_players = self.settings["n_captains"] * self.settings["n_picks"]
-                await message.channel.send(f"Error: Insufficient players to draft ({min_players}) required.")
-            await message.channel.send("Drafting has now started:\n" + self.get_specifics_string())
-            teams = await self.execute_draft()
-            teams_lines = []
-            for captain, members in teams.items():
-                teams_lines.append(', '.join([f"{captain.display_name} (captain)"] + members))
-            await message.channel.send("DRAFTING COMPLETE. TEAMS:\n" + '\n'.join(teams_lines))
-            return
+                await message.channel.send(f"Error: Insufficient players to draft ({min_players} required).")
+            else:
+                await message.channel.send("Drafting has now started:\n" + self.get_specifics_string())
+                teams = await self.execute_draft()
+                teams_lines = []
+                for captain, members in teams.items():
+                    teams_lines.append(', '.join([f"{captain.display_name} (captain)"] + members))
+                await message.channel.send("DRAFTING COMPLETE. TEAMS:\n" + '\n'.join(teams_lines))
+                return
         else:
             await self.react_confused_face(message)
             return
@@ -209,7 +211,28 @@ class DraftClient(discord.Client):
     @staticmethod
     async def direct_message(user, s):
         dm_channel = await user.create_dm() if user.dm_channel is None else user.dm_channel
-        await dm_channel.send(s)
+        return await dm_channel.send(s)
+
+    async def collect_bid(self, captain, currency):
+        dm_channel = await captain.create_dm() if captain.dm_channel is None else captain.dm_channel
+
+        bid = None
+
+        while True:
+            bid_message = await self.wait_for('message', check=lambda m: m.author == captain and m.channel == dm_channel)
+            try:
+                bid = int(bid_message)
+                if bid > currency:
+                    await self.direct_message(captain, "You don't have that much currency. Try again.")
+                else:
+                    await self.react_thumbs_up(bid_message)
+                    bid_ok_str = f"Your bid of {bid} is acknowledged. Waiting for other captains..."
+                    await self.direct_message(captain, bid_ok_str)
+                    break
+            except ValueError:
+                continue
+
+        return captain, bid
 
     async def execute_draft(self):
         self.currently_drafting = True
@@ -219,11 +242,11 @@ class DraftClient(discord.Client):
 
         # By captain
         teams = {}
-        currency = {}
+        currencies = {}
 
         for user in self.captains:
             teams[user] = []
-            currency[user] = initial_currency
+            currencies[user] = initial_currency
             await self.direct_message(user,
                                       "You are a captain! Here are the players and captains: \n" +
                                       self.get_specifics_string())
@@ -237,70 +260,43 @@ class DraftClient(discord.Client):
 
             state_lines = ["CURRENT STATE:"]
             for user in self.captains:
-                state_lines.append(f"{user.display_name} (${currency[user]}): {', '.join(teams[user])}")
+                state_lines.append(f"{user.display_name} (${currencies[user]}): {', '.join(teams[user])}")
             state_lines.append(f"Bidding Queue: {' -> '.join([p for p in player_queue])}")
             state_str = "\n".join(state_lines)
 
+            for user in self.captains:
+                await self.direct_message(user, state_str)
+
             player = player_queue.popleft()
 
-            if len(unfinished_captains) == 1:
-                winning_captain = unfinished_captains[0]
-                for user in self.captains:
-                    assignment_message = f'"{player}" is default-assigned to {winning_captain.display_name}.'
-                    await self.direct_message(user, assignment_message)
-                teams[winning_captain].append(player)
-            elif len([c for c in unfinished_captains if currency[c] > 0]) == 0:
-                winning_captain = random.sample(unfinished_captains, 1)[0]
-                for user in self.captains:
-                    assignment_message = f'"{player}" is randomly assigned to {winning_captain.display_name}.'
-                    await self.direct_message(user, assignment_message)
-                teams[winning_captain].append(player)
-            else:
-                bids = {}
-                for user in self.captains:
-                    await self.direct_message(user, state_str)
-                    await self.direct_message(user, f"Bidding on {player}.")
-                    if user not in unfinished_captains:
-                        await self.direct_message(f"You can't bid because your team is full.")
-                        continue
+            for user in self.captains:
+                if user not in unfinished_captains:
+                    await self.direct_message(user, f"You can't bid because your team is full.")
+                    continue
 
-                    await self.direct_message(user, f"Input an integer to bid. Remaining currency: ${currency[user]}")
+            collect_bid_tasks = [self.collect_bid(user, currencies[user]) for user in unfinished_captains]
+            bid_pairs = await asyncio.gather(collect_bid_tasks)
 
-                    # Wait for a valid bid.
-                    while True:
-                        bid_message = await self.wait_for('message')
-                        try:
-                            bid = int(bid_message.content)
-                            if bid > currency[user]:
-                                await self.direct_message(user, "You don't have that much currency. Try again.")
-                                continue
-                            else:
-                                bids[user] = bid
-                                break
-                        except ValueError:
-                            await self.direct_message(user, "That wasn't a valid bid. Try again.")
-                            continue
+            highest_bid = -float('inf')
+            highest_bidding_captains = []
+            for captain, bid in bid_pairs:
+                if bid > highest_bid:
+                    highest_bidding_captains = [captain]
+                    highest_bid = bid
+                elif bid == highest_bid:
+                    highest_bidding_captains.append(captain)
 
-                highest_bid = -float('inf')
-                highest_bidding_captains = []
-                for user, bid in bids.items():
-                    if bid > highest_bid:
-                        highest_bidding_captains = [user]
-                        highest_bid = bid
-                    elif bid == highest_bid:
-                        highest_bidding_captains.append(user)
+            if highest_bid >= 0:
                 winning_captain = random.sample(highest_bidding_captains, 1)[0]
-
-                if highest_bid > 0:
-                    teams[winning_captain].append(player)
-                    currency[winning_captain] -= highest_bid
-                    for user in self.captains:
-                        await self.direct_message(user, f'"{player}" is secured by {winning_captain.display_name} '
-                                                        f'for ${highest_bid}')
-                else:
-                    player_queue.append(player)
-                    for user in self.captains:
-                        await self.direct_message(user, f'"{player}" was not drafted and was re-enqueued.')
+                teams[winning_captain].append(player)
+                currencies[winning_captain] -= highest_bid
+                for user in self.captains:
+                    await self.direct_message(user, f'"{player}" is secured by {winning_captain.display_name} '
+                                                    f'for ${highest_bid}')
+            else:
+                player_queue.append(player)
+                for user in self.captains:
+                    await self.direct_message(user, f'"{player}" was not drafted and was re-enqueued.')
 
         for user in self.captains:
             await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(teams[user])}")
