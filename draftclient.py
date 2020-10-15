@@ -221,7 +221,7 @@ class DraftClient(discord.Client):
         while True:
             bid_message = await self.wait_for('message', check=lambda m: m.author == captain and m.channel == dm_channel)
             try:
-                bid = int(bid_message)
+                bid = int(bid_message.content)
                 if bid > currency:
                     await self.direct_message(captain, "You don't have that much currency. Try again.")
                 else:
@@ -270,12 +270,13 @@ class DraftClient(discord.Client):
             player = player_queue.popleft()
 
             for user in self.captains:
+                await self.direct_message(user, f'Currently bidding on: "{player}"')
                 if user not in unfinished_captains:
                     await self.direct_message(user, f"You can't bid because your team is full.")
                     continue
 
             collect_bid_tasks = [self.collect_bid(user, currencies[user]) for user in unfinished_captains]
-            bid_pairs = await asyncio.gather(collect_bid_tasks)
+            bid_pairs = await asyncio.gather(*collect_bid_tasks)
 
             highest_bid = -float('inf')
             highest_bidding_captains = []
