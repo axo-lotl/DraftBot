@@ -330,7 +330,10 @@ class DraftClient(discord.Client):
                 for user in self.captains:
                     await self.direct_message(user, f'"{player}" was not drafted and was re-enqueued.')
 
-        for user in self.captains:
-            await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(teams[user])}")
+        if self.currently_drafting:
+            for user in self.captains:
+                team = teams[user]
+                random.shuffle(team)
+                await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(team)}")
         self.currently_drafting = False
         return teams
