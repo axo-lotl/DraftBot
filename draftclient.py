@@ -69,8 +69,6 @@ class DraftClient(discord.Client):
     async def on_ready(self):
         if len(self.guilds) == 0:
             self.terminate("Connected, but there are no client guilds.")
-        elif len(self.guilds) >= 2:
-            self.terminate("Connected, but there is more than one client guild.")
         else:
             for g in self.guilds:
                 self.log(f"{self.user} has connected to guild {g.name} (id = {g.id}).")
@@ -103,6 +101,7 @@ class DraftClient(discord.Client):
             f'Example: {DraftClient.PREFIX} add_player player1 player2',
             '"help": Shows this menu',
             '"awaken", "clear", "reset": Resets the specifics (captains/players) of the draft',
+            '""force_reset": Forcibly resets, even if drafting is in progress',
             '"settings", "view_settings": Views settings',
             '"change_setting": Change a particular setting. Two arguments: setting name and value.',
             '"add_player", "add_players": Adds a nonzero number of players specified by the remaining arguments',
@@ -114,99 +113,112 @@ class DraftClient(discord.Client):
     @staticmethod
     def get_auction_rules_string():
         lines = [
+            "RULES:"
+            "This is a first-price blind auction.",
             "Players will be queued up for consideration in a random order.",
             "When a player is up for bidding, I will ask you for your bids privately.",
             "Obviously, you may not bid higher than your current currency.",
             "A captain who makes a larger nonnegative bid will secure the player at that price.",
-            "Ties in winning bids ($0 or above) are broken randomly."
+            "Ties in winning bids ($0 or above) are broken randomly.",
             "If neither captain bids $0 or above, the player is placed at the back of the queue."
         ]
         return "\n".join(lines)
 
     async def on_message(self, message):
-        content = message.content
-        if not message.content.startswith(self.PREFIX):
-            return
+        try:
+            content = message.content
+            if not message.content.startswith(self.PREFIX):
+                return
 
-        words = content[len(self.PREFIX):].split(" ")
-        command = words[0].lower()
-        if command == "help":
-            await self.react_thumbs_up(message)
-            await message.channel.send(self.get_help_string())
-            return
-
-        if self.currently_drafting:
-            await message.channel.send("I'm not listening to commands; drafting is currently in progress.")
-            return
-
-        if command in {"awaken", "clear", "reset"}:
-            self.reset_state()
-            await self.react_thumbs_up(message)
-            await message.channel.send("Draft specifics have been reset! Use \"help\" for a list of commands")
-            return
-        elif command in {"settings", "view_settings"}:
-            await self.react_thumbs_up(message)
-            await message.channel.send("CURRENT SETTINGS:\n" + self.get_settings_string())
-            return
-        elif command == "change_setting":
-            if self.change_setting(words[1].lower(), words[2].lower()):
+            words = content[len(self.PREFIX):].split()
+            command = words[0].lower()
+            self.log(f"parsed words: [{', '.join(words)}]")
+            if command == "help":
+                await self.react_thumbs_up(message)
+                await message.channel.send(self.get_help_string())
+                return
+            elif command == "force_reset":
+                self.currently_drafting = False
                 self.reset_state()
                 await self.react_thumbs_up(message)
-                await message.channel.send("Since settings have changed, the draft specifics have been reset.")
-            else:
-                await self.react_thumbs_down(message)
-                await message.channel.send("Error: These settings changes were invalid.")
-            return
-        elif command in {"add_player", "add_players"}:
-            named_players = words[1:]
-            if len(named_players) == 0:
-                await self.react_thumbs_down(message)
-                await message.channel.send("Error: No players to add.")
+                await message.channel.send("Draft specifics have been reset! Use \"help\" for a list of commands")
                 return
-            for player in named_players:
-                if player in self.players:
+
+            if self.currently_drafting:
+                await message.channel.send('I\'m not listening to commands other than "help" and "force_reset"; '
+                                           'drafting is currently in progress.')
+                return
+
+            if command in {"awaken", "clear", "reset"}:
+                self.reset_state()
+                await self.react_thumbs_up(message)
+                await message.channel.send("Draft specifics have been reset! Use \"help\" for a list of commands")
+                return
+            elif command in {"settings", "view_settings"}:
+                await self.react_thumbs_up(message)
+                await message.channel.send("CURRENT SETTINGS:\n" + self.get_settings_string())
+                return
+            elif command == "change_setting":
+                if self.change_setting(words[1].lower(), words[2].lower()):
+                    self.reset_state()
+                    await self.react_thumbs_up(message)
+                    await message.channel.send("Since settings have changed, the draft specifics have been reset.")
+                else:
                     await self.react_thumbs_down(message)
-                    await message.channel.send("Error: This player has already been added.")
+                    await message.channel.send("Error: These settings changes were invalid.")
+                return
+            elif command in {"add_player", "add_players"}:
+                named_players = words[1:]
+                if len(named_players) == 0:
+                    await self.react_thumbs_down(message)
+                    await message.channel.send("Error: No players to add.")
+                    return
+                for player in named_players:
+                    if player in self.players:
+                        await self.react_thumbs_down(message)
+                        await message.channel.send("Error: This player has already been added.")
+                    else:
+                        await self.react_thumbs_up(message)
+                        self.players.add(player)
+                await message.channel.send(self.get_specifics_string())
+                return
+            elif command == "claim_captain":
+                user = message.author
+                if user in self.captains:
+                    await self.react_thumbs_down(message)
+                    await message.channel.send("Error: You are already a captain.")
+                elif len(self.captains) >= self.settings["n_captains"]:
+                    await self.react_thumbs_down(message)
+                    await message.channel.send("Error: There are already enough captains.")
                 else:
                     await self.react_thumbs_up(message)
-                    self.players.add(player)
-            await message.channel.send(self.get_specifics_string())
-            return
-        elif command == "claim_captain":
-            user = message.author
-            if user in self.captains:
-                await self.react_thumbs_down(message)
-                await message.channel.send("Error: You are already a captain.")
-            elif len(self.captains) >= self.settings["n_captains"]:
-                await self.react_thumbs_down(message)
-                await message.channel.send("Error: There are already enough captains.")
-            else:
-                await self.react_thumbs_up(message)
-                self.captains.add(user)
-            await message.channel.send(self.get_specifics_string())
-            return
-        elif command in {"commence", "start", "begin"}:
-            if message.author not in self.captains:
-                await self.react_thumbs_down(message)
-                await message.channel.send("Error: You aren't a captain.")
-            elif len(self.captains) < self.settings["n_captains"]:
-                await self.react_thumbs_down(message)
-                await message.channel.send("Error: Insufficient captains.")
-            elif len(self.players) < self.settings["n_captains"] * self.settings["n_picks"]:
-                await self.react_thumbs_down(message)
-                min_players = self.settings["n_captains"] * self.settings["n_picks"]
-                await message.channel.send(f"Error: Insufficient players to draft ({min_players} required).")
-            else:
-                await message.channel.send("Drafting has now started:\n" + self.get_specifics_string())
-                teams = await self.execute_draft()
-                teams_lines = []
-                for captain, members in teams.items():
-                    teams_lines.append(', '.join([f"{captain.display_name} (captain)"] + members))
-                await message.channel.send("DRAFTING COMPLETE. TEAMS:\n" + '\n'.join(teams_lines))
+                    self.captains.add(user)
+                await message.channel.send(self.get_specifics_string())
                 return
-        else:
-            await self.react_confused_face(message)
-            return
+            elif command in {"commence", "start", "begin"}:
+                if message.author not in self.captains:
+                    await self.react_thumbs_down(message)
+                    await message.channel.send("Error: You aren't a captain.")
+                elif len(self.captains) < self.settings["n_captains"]:
+                    await self.react_thumbs_down(message)
+                    await message.channel.send("Error: Insufficient captains.")
+                elif len(self.players) < self.settings["n_captains"] * self.settings["n_picks"]:
+                    await self.react_thumbs_down(message)
+                    min_players = self.settings["n_captains"] * self.settings["n_picks"]
+                    await message.channel.send(f"Error: Insufficient players to draft ({min_players} required).")
+                else:
+                    await message.channel.send("Drafting has now started:\n" + self.get_specifics_string())
+                    teams = await self.execute_draft()
+                    teams_lines = []
+                    for captain, members in teams.items():
+                        teams_lines.append(', '.join([f"{captain.display_name} (captain)"] + members))
+                    await message.channel.send("DRAFTING COMPLETE. TEAMS:\n" + '\n'.join(teams_lines))
+                    return
+            else:
+                await self.react_confused_face(message)
+                return
+        except UnicodeEncodeError:
+            self.log("UnicodeEncodeError")
 
     @staticmethod
     async def direct_message(user, s):
@@ -219,11 +231,24 @@ class DraftClient(discord.Client):
         bid = None
 
         while True:
-            bid_message = await self.wait_for('message', check=lambda m: m.author == captain and m.channel == dm_channel)
+            if not self.currently_drafting:
+                for user in self.captains:
+                    await self.direct_message(user, "Bidding is terminated because the draft was terminated.")
+                    return captain, -1
+
+            try:
+                bid_message = await self.wait_for('message',
+                                                  check=lambda m: m.author == captain and m.channel == dm_channel,
+                                                  timeout=30)
+            except asyncio.TimeoutError:
+                await self.direct_message(captain, "You timed out. Try again.")
+                continue
+
             try:
                 bid = int(bid_message.content)
                 if bid > currency:
                     await self.direct_message(captain, "You don't have that much currency. Try again.")
+                    continue
                 else:
                     await self.react_thumbs_up(bid_message)
                     bid_ok_str = f"Your bid of {bid} is acknowledged. Waiting for other captains..."
@@ -254,6 +279,12 @@ class DraftClient(discord.Client):
 
         player_queue = collections.deque(random.sample(self.players, len(self.players)))
         while player_queue:
+
+            if not self.currently_drafting:
+                for user in self.captains:
+                    await self.direct_message(user, "The draft was terminated.")
+                    return
+
             unfinished_captains = [c for c in self.captains if len(teams[c]) < n_picks]
             if len(unfinished_captains) == 0:
                 break
