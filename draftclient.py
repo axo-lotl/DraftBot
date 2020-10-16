@@ -75,18 +75,6 @@ class DraftClient(discord.Client):
         self.log(f"ERROR CAUSING TERMINATION: {reason}")
         raise ValueError
 
-    @staticmethod
-    async def react_thumbs_up(message):
-        await message.add_reaction("\U0001F44D")
-
-    @staticmethod
-    async def react_thumbs_down(message):
-        await message.add_reaction("\U0001F44E")
-
-    @staticmethod
-    async def react_confused_face(message):
-        await message.add_reaction("\U0001F615")
-
     async def on_message(self, message):
         try:
             content = message.content
@@ -182,6 +170,8 @@ class DraftClient(discord.Client):
                     return
             else:
                 await self.react_confused_face(message)
+                if random.random() < 0.03:
+                    await message.channel.send("what")
                 return
         except UnicodeEncodeError:
             self.log("UnicodeEncodeError")
@@ -298,6 +288,18 @@ class DraftClient(discord.Client):
                 await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(team)}")
         self.currently_drafting = False
         return teams
+
+    @staticmethod
+    async def react_thumbs_up(message):
+        await message.add_reaction("\U0001F44D")
+
+    @staticmethod
+    async def react_thumbs_down(message):
+        await message.add_reaction("\U0001F44E")
+
+    @staticmethod
+    async def react_confused_face(message):
+        await message.add_reaction("\U0001F615")
 
     def get_settings_string(self):
         lines = ['**SETTINGS**', "{"]
