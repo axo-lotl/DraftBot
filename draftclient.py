@@ -83,7 +83,7 @@ class DraftClient(discord.Client):
 
             words = content[len(self.PREFIX):].split()
             command = words[0].lower()
-            self.log(f"parsed words: [{', '.join(words)}]")
+            self.log(f"message received, parsed words: [{', '.join(words)}]")
             if command == "help":
                 await self.react_thumbs_up(message)
                 await message.channel.send(self.get_help_string())
@@ -130,12 +130,13 @@ class DraftClient(discord.Client):
                     await message.channel.send("Error: No players to add.")
                     return
                 for player in named_players:
-                    if player in self.players:
-                        await self.react_thumbs_down(message)
-                        await message.channel.send("Error: This player has already been added.")
-                    else:
+                    valid, reason = self.can_add_player(player)
+                    if valid:
                         await self.react_thumbs_up(message)
                         self.players.add(player)
+                    else:
+                        await self.react_thumbs_down(message)
+                        await message.channel.send(f"Did not add player {player}. {reason}")
                 await message.channel.send(self.get_state_string())
                 return
             elif command == "claim_captain":
@@ -281,6 +282,23 @@ class DraftClient(discord.Client):
             await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(team)}")
         return teams
 
+    def can_add_player(self, name):
+        """
+        Checks if the player name is valid and if it can be added.
+        :param name:
+        :return: bool, string: A boolean indicating whether the name is valid. If invalid, a string explaining why.
+        """
+        if len(name) > 30:
+            return False, "The player's name exceeds 30 characters."
+        elif not name.isalnum():
+            return False, "The player's name contains non-alphanumeric characters."
+        elif name in self.players:
+            return False, "The player's name is already added."
+        elif len(self.players) >= 50:
+            return False, f"There are already too many players ({len(self.players)})."
+        else:
+            return True, None
+
     @staticmethod
     async def react_thumbs_up(message):
         await message.add_reaction("\U0001F44D")
@@ -298,13 +316,13 @@ class DraftClient(discord.Client):
         for key, value in self.settings.items():
             lines.append(f"\t{key}: {value}")
         lines.append("}")
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
     def get_state_string(self):
         lines = ['**STATE**',
                  f"Captains ({len(self.captains)}): {', '.join([u.display_name for u in self.captains])}",
                  f"Players ({len(self.players)}): {', '.join(self.players)}"]
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
     @staticmethod
     def get_help_string():
