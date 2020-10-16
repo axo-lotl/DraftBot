@@ -28,17 +28,10 @@ class DraftClient(discord.Client):
         self.captains = set([])
         self.players = set([])
 
-    def get_settings_string(self):
-        lines = ["{"]
-        for key, value in self.settings.items():
-            lines.append(f"\t{key}: {value}")
-        lines.append("}")
-        return "\n".join(lines)
-
-    def get_specifics_string(self):
-        lines = [f"Captains ({len(self.captains)}): {', '.join([u.display_name for u in self.captains])}",
-                 f"Players ({len(self.players)}): {', '.join(self.players)}"]
-        return "\n".join(lines)
+    @staticmethod
+    async def direct_message(user, s):
+        dm_channel = await user.create_dm() if user.dm_channel is None else user.dm_channel
+        return await dm_channel.send(s)
 
     def change_setting(self, setting, value_str):
         try:
@@ -94,36 +87,6 @@ class DraftClient(discord.Client):
     async def react_confused_face(message):
         await message.add_reaction("\U0001F615")
 
-    @staticmethod
-    def get_help_string():
-        lines = [
-            'All arguments are whitespace-separated.',
-            f'Example: {DraftClient.PREFIX} add_player player1 player2',
-            '"help": Shows this menu',
-            '"awaken", "clear", "reset": Resets the specifics (captains/players) of the draft',
-            '""force_reset": Forcibly resets, even if drafting is in progress',
-            '"settings", "view_settings": Views settings',
-            '"change_setting": Change a particular setting. Two arguments: setting name and value.',
-            '"add_player", "add_players": Adds a nonzero number of players specified by the remaining arguments',
-            '"claim_captain": Register as a captain for the draft.',
-            '"commence", "start", "begin": Start the drafting phase (in DMs); captains and players must be set.'
-        ]
-        return "\n".join(lines)
-
-    @staticmethod
-    def get_auction_rules_string():
-        lines = [
-            "RULES:"
-            "This is a first-price blind auction.",
-            "Players will be queued up for consideration in a random order.",
-            "When a player is up for bidding, I will ask you for your bids privately.",
-            "Obviously, you may not bid higher than your current currency.",
-            "A captain who makes a larger nonnegative bid will secure the player at that price.",
-            "Ties in winning bids ($0 or above) are broken randomly.",
-            "If neither captain bids $0 or above, the player is placed at the back of the queue."
-        ]
-        return "\n".join(lines)
-
     async def on_message(self, message):
         try:
             content = message.content
@@ -141,18 +104,21 @@ class DraftClient(discord.Client):
                 self.currently_drafting = False
                 self.reset_state()
                 await self.react_thumbs_up(message)
-                await message.channel.send("Draft specifics have been reset! Use \"help\" for a list of commands")
+                await message.channel.send("Draft state has been cleared.")
                 return
 
             if self.currently_drafting:
                 await message.channel.send('I\'m not listening to commands other than "help" and "force_reset"; '
                                            'drafting is currently in progress.')
                 return
-
             if command in {"awaken", "clear", "reset"}:
                 self.reset_state()
                 await self.react_thumbs_up(message)
-                await message.channel.send("Draft specifics have been reset! Use \"help\" for a list of commands")
+                await message.channel.send("Draft state has been cleared.")
+                return
+            elif command in {"state", "view_state"}:
+                await self.react_thumbs_up(message)
+                await message.channel.send(self.get_state_string())
                 return
             elif command in {"settings", "view_settings"}:
                 await self.react_thumbs_up(message)
@@ -162,7 +128,7 @@ class DraftClient(discord.Client):
                 if self.change_setting(words[1].lower(), words[2].lower()):
                     self.reset_state()
                     await self.react_thumbs_up(message)
-                    await message.channel.send("Since settings have changed, the draft specifics have been reset.")
+                    await message.channel.send("Since settings have changed, the draft state has been reset.")
                 else:
                     await self.react_thumbs_down(message)
                     await message.channel.send("Error: These settings changes were invalid.")
@@ -180,7 +146,7 @@ class DraftClient(discord.Client):
                     else:
                         await self.react_thumbs_up(message)
                         self.players.add(player)
-                await message.channel.send(self.get_specifics_string())
+                await message.channel.send(self.get_state_string())
                 return
             elif command == "claim_captain":
                 user = message.author
@@ -193,7 +159,7 @@ class DraftClient(discord.Client):
                 else:
                     await self.react_thumbs_up(message)
                     self.captains.add(user)
-                await message.channel.send(self.get_specifics_string())
+                await message.channel.send(self.get_state_string())
                 return
             elif command in {"commence", "start", "begin"}:
                 if message.author not in self.captains:
@@ -207,7 +173,7 @@ class DraftClient(discord.Client):
                     min_players = self.settings["n_captains"] * self.settings["n_picks"]
                     await message.channel.send(f"Error: Insufficient players to draft ({min_players} required).")
                 else:
-                    await message.channel.send("Drafting has now started:\n" + self.get_specifics_string())
+                    await message.channel.send("Drafting has now started:\n" + self.get_state_string())
                     teams = await self.execute_draft()
                     teams_lines = []
                     for captain, members in teams.items():
@@ -219,11 +185,6 @@ class DraftClient(discord.Client):
                 return
         except UnicodeEncodeError:
             self.log("UnicodeEncodeError")
-
-    @staticmethod
-    async def direct_message(user, s):
-        dm_channel = await user.create_dm() if user.dm_channel is None else user.dm_channel
-        return await dm_channel.send(s)
 
     async def collect_bid(self, captain, currency):
         dm_channel = await captain.create_dm() if captain.dm_channel is None else captain.dm_channel
@@ -274,7 +235,7 @@ class DraftClient(discord.Client):
             currencies[user] = initial_currency
             await self.direct_message(user,
                                       "You are a captain! Here are the players and captains: \n" +
-                                      self.get_specifics_string())
+                                      self.get_state_string())
             await self.direct_message(user, self.get_auction_rules_string())
 
         player_queue = collections.deque(random.sample(self.players, len(self.players)))
@@ -337,3 +298,47 @@ class DraftClient(discord.Client):
                 await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(team)}")
         self.currently_drafting = False
         return teams
+
+    def get_settings_string(self):
+        lines = ["{"]
+        for key, value in self.settings.items():
+            lines.append(f"\t{key}: {value}")
+        lines.append("}")
+        return "\n".join(lines)
+
+    def get_state_string(self):
+        lines = [f"Captains ({len(self.captains)}): {', '.join([u.display_name for u in self.captains])}",
+                 f"Players ({len(self.players)}): {', '.join(self.players)}"]
+        return "\n".join(lines)
+
+    @staticmethod
+    def get_help_string():
+        lines = [
+            'All arguments are whitespace-separated.',
+            f'Example: {DraftClient.PREFIX} add_player player1 player2',
+            '"help": Shows this menu',
+            '"state", "view_state": Views the state (captains & players) of the draft',
+            '"awaken", "clear", "reset": Resets the state (captains & players) of the draft',
+            '"force_reset": Forcibly resets, even if drafting is in progress',
+            '"settings", "view_settings": Views settings',
+            '"change_setting": Change a particular setting. Two arguments: setting name and value.',
+            '"add_player", "add_players": Adds a nonzero number of players specified by the remaining arguments',
+            '"claim_captain": Register as a captain for the draft.',
+            '"commence", "start", "begin": Start the drafting phase (in DMs); captains and players must be set.'
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def get_auction_rules_string():
+        lines = [
+            "RULES:"
+            "This is a first-price blind auction.",
+            "Players will be queued up for consideration in a random order.",
+            "When a player is up for bidding, I will ask you for your bids privately.",
+            "Obviously, you may not bid higher than your current currency.",
+            "A captain who makes a larger nonnegative bid will secure the player at that price.",
+            "Ties in winning bids ($0 or above) are broken randomly.",
+            "If neither captain bids $0 or above, the player is placed at the back of the queue."
+        ]
+        return "\n".join(lines)
+
