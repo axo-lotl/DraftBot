@@ -2,7 +2,6 @@ import asyncio
 import collections
 import discord
 import random
-from discord.ext import commands
 
 
 class DraftClient(discord.Client):
@@ -14,7 +13,8 @@ class DraftClient(discord.Client):
         self.guild = None
         self.log_file_name = log_file_name
 
-        self.currently_drafting = False
+        self.draft_task = None
+
         self.captains = set([])
         self.players = None
         self.reset_state()
@@ -89,17 +89,19 @@ class DraftClient(discord.Client):
                 await message.channel.send(self.get_help_string())
                 return
             elif command == "force_reset":
-                self.currently_drafting = False
-                self.reset_state()
                 await self.react_thumbs_up(message)
+                if self.draft_task:
+                    self.draft_task.cancel()
+
+                self.reset_state()
                 await message.channel.send("Draft state has been cleared.")
                 return
 
-            if self.currently_drafting:
+            if self.draft_task:
                 await message.channel.send('I\'m not listening to commands other than "help" and "force_reset"; '
                                            'drafting is currently in progress.')
                 return
-            if command in {"awaken", "clear", "clear_state", "reset", "reset_state"}:
+            if command in {"awaken", "reset", "reset_state"}:
                 self.reset_state()
                 await self.react_thumbs_up(message)
                 await message.channel.send("Draft state has been cleared.")
@@ -162,11 +164,17 @@ class DraftClient(discord.Client):
                     await message.channel.send(f"Error: Insufficient players to draft ({min_players} required).")
                 else:
                     await message.channel.send("Drafting has now started:\n" + self.get_state_string())
-                    teams = await self.execute_draft()
-                    teams_lines = []
-                    for captain, members in teams.items():
-                        teams_lines.append(', '.join([f"{captain.display_name} (captain)"] + members))
-                    await message.channel.send("DRAFTING COMPLETE. TEAMS:\n" + '\n'.join(teams_lines))
+                    self.draft_task = asyncio.create_task(self.execute_draft())
+                    try:
+                        teams = await self.draft_task
+                        teams_lines = []
+                        for captain, members in teams.items():
+                            teams_lines.append(', '.join([f"{captain.display_name} (captain)"] + members))
+                        await message.channel.send("**DRAFTING COMPLETE. TEAMS:**\n" + '\n'.join(teams_lines))
+                    except asyncio.CancelledError:
+                        await message.channel.send("Drafting has been cancelled.")
+                    finally:
+                        self.draft_task = None
                     return
             else:
                 await self.react_confused_face(message)
@@ -182,18 +190,8 @@ class DraftClient(discord.Client):
         bid = None
 
         while True:
-            if not self.currently_drafting:
-                for user in self.captains:
-                    await self.direct_message(user, "Bidding is terminated because the draft was terminated.")
-                    return captain, -1
-
-            try:
-                bid_message = await self.wait_for('message',
-                                                  check=lambda m: m.author == captain and m.channel == dm_channel,
-                                                  timeout=30)
-            except asyncio.TimeoutError:
-                await self.direct_message(captain, "You timed out. Try again.")
-                continue
+            bid_message = await self.wait_for('message',
+                                              check=lambda m: m.author == captain and m.channel == dm_channel)
 
             try:
                 bid = int(bid_message.content)
@@ -211,8 +209,6 @@ class DraftClient(discord.Client):
         return captain, bid
 
     async def execute_draft(self):
-        self.currently_drafting = True
-
         initial_currency = self.settings["initial_currency"]
         n_picks = self.settings["n_picks"]
 
@@ -230,24 +226,18 @@ class DraftClient(discord.Client):
 
         player_queue = collections.deque(random.sample(self.players, len(self.players)))
         while player_queue:
-
-            if not self.currently_drafting:
-                for user in self.captains:
-                    await self.direct_message(user, "The draft was terminated.")
-                    return
-
             unfinished_captains = [c for c in self.captains if len(teams[c]) < n_picks]
             if len(unfinished_captains) == 0:
                 break
 
-            state_lines = ["CURRENT STATE:"]
+            progress_lines = ["**DRAFT PROGRESS**"]
             for user in self.captains:
-                state_lines.append(f"{user.display_name} (${currencies[user]}): {', '.join(teams[user])}")
-            state_lines.append(f"Bidding Queue: {' -> '.join([p for p in player_queue])}")
-            state_str = "\n".join(state_lines)
+                progress_lines.append(f"{user.display_name} (${currencies[user]}): {', '.join(teams[user])}")
+            progress_lines.append(f"Bidding Queue: {' -> '.join([p for p in player_queue])}")
+            progress_str = "\n".join(progress_lines)
 
             for user in self.captains:
-                await self.direct_message(user, state_str)
+                await self.direct_message(user, progress_str)
 
             player = player_queue.popleft()
 
@@ -274,19 +264,21 @@ class DraftClient(discord.Client):
                 teams[winning_captain].append(player)
                 currencies[winning_captain] -= highest_bid
                 for user in self.captains:
-                    await self.direct_message(user, f'**{player}** is secured by {winning_captain.display_name} '
+                    if len(highest_bidding_captains) > 1:
+                        tied_captains_str = ', '.join([c.display_name for c in highest_bidding_captains])
+                        tie_message = f"There was a tie for **{player}** among: {tied_captains_str}"
+                        await self.direct_message(user, tie_message)
+                    await self.direct_message(user, f'**{player}** is secured by **{winning_captain.display_name}** '
                                                     f'for ${highest_bid}')
             else:
                 player_queue.append(player)
                 for user in self.captains:
                     await self.direct_message(user, f'**{player}** was not drafted and was re-enqueued.')
 
-        if self.currently_drafting:
-            for user in self.captains:
-                team = teams[user]
-                random.shuffle(team)
-                await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(team)}")
-        self.currently_drafting = False
+        for user in self.captains:
+            team = teams[user]
+            random.shuffle(team)
+            await self.direct_message(user, f"Drafting has finished. Your team: {', '.join(team)}")
         return teams
 
     @staticmethod
@@ -322,7 +314,7 @@ class DraftClient(discord.Client):
             f'Example: {DraftClient.PREFIX} add_player player1 player2',
             '"help": Shows this menu',
             '"state", "view_state": Views the state (captains & players)',
-            '"awaken", "clear", "clear_state", "reset", "reset_state": Resets the state (captains & players)',
+            '"awaken", "reset", "reset_state": Resets the state (captains & players)',
             '"force_reset": Forcibly resets, even if drafting is in progress',
             '"settings", "view_settings": Views settings',
             '"change_setting": Change a particular setting. Two arguments: setting name and value.',
@@ -345,4 +337,3 @@ class DraftClient(discord.Client):
             "If neither captain bids $0 or above, the player is placed at the back of the queue."
         ]
         return "\n".join(lines)
-
