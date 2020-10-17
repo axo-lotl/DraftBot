@@ -136,7 +136,7 @@ class DraftClient(discord.Client):
                         self.players.add(player)
                     else:
                         await self.react_thumbs_down(message)
-                        await message.channel.send(f"Did not add player {player}. {reason}")
+                        await message.channel.send(f"Couldn't add a player. {reason}")
                 await message.channel.send(self.get_state_string())
                 return
             elif command == "claim_captain":
@@ -352,6 +352,6 @@ class DraftClient(discord.Client):
             "Obviously, you may not bid higher than your current currency.",
             "A captain who makes a larger nonnegative bid will secure the player at that price.",
             "Ties in winning bids ($0 or above) are broken randomly.",
-            "If neither captain bids $0 or above, the player is placed at the back of the queue."
+            "If both captains bid negative amounts, the player is placed at the back of the queue."
         ]
         return "\n".join(lines)
