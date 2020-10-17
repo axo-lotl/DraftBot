@@ -59,17 +59,16 @@ class DraftClient(discord.Client):
                 await self.react_thumbs_up(message)
                 await message.channel.send(self.get_help_string())
                 return
-            elif command == "force_reset":
-                await self.react_thumbs_up(message)
+            elif command == "stop_draft":
                 if self.draft_task:
+                    await self.react_thumbs_up(message)
                     self.draft_task.cancel()
-
-                self.reset_state()
-                await message.channel.send("Draft state has been cleared.")
+                else:
+                    await message.channel.send("There is no draft in progress.")
                 return
 
             if self.draft_task:
-                await message.channel.send('I\'m not listening to commands other than "help" and "force_reset"; '
+                await message.channel.send('I\'m not listening to commands other than "help" and "stop_draft"; '
                                            'drafting is currently in progress.')
                 return
             if command in {"awaken", "reset", "reset_state"}:
@@ -171,6 +170,8 @@ class DraftClient(discord.Client):
                 if bid > currency:
                     await self.direct_message(captain, "You don't have that much currency. Try again.")
                     continue
+                elif bid < -1:
+                    await self.direct_message(captain, "-1 is a rejection bid. You can't bid lower than that.")
                 else:
                     await self.react_thumbs_up(bid_message)
                     bid_ok_str = f"Your bid of {bid} is acknowledged. Waiting for other captains..."
@@ -188,6 +189,9 @@ class DraftClient(discord.Client):
         # By captain
         teams = {}
         currencies = {}
+
+        # By player
+        n_rebids_remaining = {player: self.settings.n_rebids_on_tie for player in self.players}
 
         for user in self.captains:
             teams[user] = []
@@ -215,15 +219,18 @@ class DraftClient(discord.Client):
             player = player_queue.popleft()
 
             for user in self.captains:
-                await self.direct_message(user, f'Input a bid for: **{player}**')
+                bid_message = f'Bidding on **{player}**. # rebids available: {n_rebids_remaining[player]}\n' \
+                              f'Input an integer bid up to your current currency (or -1 to bid rejection)'
+                await self.direct_message(user, bid_message)
                 if user not in unfinished_captains:
                     await self.direct_message(user, f"You can't bid because your team is full.")
                     continue
 
+            highest_bid = -2
+
             collect_bid_tasks = [self.collect_bid(user, currencies[user]) for user in unfinished_captains]
             bid_pairs = await asyncio.gather(*collect_bid_tasks)
 
-            highest_bid = -float('inf')
             highest_bidding_captains = []
             for captain, bid in bid_pairs:
                 if bid > highest_bid:
@@ -232,21 +239,44 @@ class DraftClient(discord.Client):
                 elif bid == highest_bid:
                     highest_bidding_captains.append(captain)
 
+            if len(highest_bidding_captains) > 1:
+                if n_rebids_remaining[player] > 0:
+                    if highest_bid >= 0:
+                        for user in self.captains:
+                            await self.direct_message(user, f"There was a tie of 0 or more, "
+                                                            f"so we will rebid immediately.")
+                        player_queue.appendleft(player)
+
+                    else:
+                        for user in self.captains:
+                            await self.direct_message(user, f"There was a rejection bid tie, so the player will be"
+                                                            f"moved to the back of the queue.")
+                        player_queue.append(player)
+                    n_rebids_remaining[player] -= 1
+                    continue
+                else:
+                    for user in self.captains:
+                        await self.direct_message(user, "There was a tie with no rebids remaining, "
+                                                        "so I will randomly choose the winner.")
+                    winning_captain = random.sample(highest_bidding_captains, 1)[0]
+                    highest_bid = max(highest_bid, 0)
+            else:
+                winning_captain = highest_bidding_captains[0]
+
+            # By here there must only be a singular winning captain.
+
             if highest_bid >= 0:
-                winning_captain = random.sample(highest_bidding_captains, 1)[0]
                 teams[winning_captain].append(player)
                 currencies[winning_captain] -= highest_bid
                 for user in self.captains:
-                    if len(highest_bidding_captains) > 1:
-                        tied_captains_str = ', '.join([c.display_name for c in highest_bidding_captains])
-                        tie_message = f"There was a tie for **{player}** among: {tied_captains_str}"
-                        await self.direct_message(user, tie_message)
                     await self.direct_message(user, f'**{player}** is secured by **{winning_captain.display_name}** '
                                                     f'for ${highest_bid}')
             else:
-                player_queue.append(player)
+                # Singular remaining captain rejecting a player.
                 for user in self.captains:
-                    await self.direct_message(user, f'**{player}** was not drafted and was re-enqueued.')
+                    await self.direct_message(user, f"Due to a rejection, the player will be moved to the back of "
+                                                    f"the queue.")
+                player_queue.append(player)
 
         for user in self.captains:
             team = teams[user]
@@ -301,25 +331,33 @@ class DraftClient(discord.Client):
             '"help": Shows this menu',
             '"state", "view_state": Views the state (captains & players)',
             '"awaken", "reset", "reset_state": Resets the state (captains & players)',
-            '"force_reset": Forcibly resets, even if drafting is in progress',
             '"settings", "view_settings": Views settings',
             '"change_setting": Change a particular setting. Two arguments: setting name and value.',
             '"add_player", "add_players": Adds a nonzero number of players specified by the remaining arguments',
             '"claim_captain": Register as a captain for the draft.',
-            '"commence", "start", "begin": Start the drafting phase (in DMs); captains and players must be set.'
+            '"commence", "start", "begin": Start the drafting phase (in DMs); captains and players must be set.',
+            '"stop_draft": Stops an in-progress draft'
         ]
         return "\n".join(lines)
 
-    @staticmethod
-    def get_auction_rules_string():
+    def get_auction_rules_string(self):
+        if self.settings.n_rebids_on_tie == 0:
+            rebid_line = "There are no rebids, so ties are immediately broken randomly."
+        else:
+            rebid_line = f"In case of ties among winning bids, you can rebid on each player " \
+                         f"{self.settings.n_rebids_on_tie} times. Rejection bid ties place the player at the back of " \
+                         f"the queue; otherwise, rebidding happens immediately."
+        bidding_lines = [
+            "**Bidding:**",
+            "When a player is up for bidding, I will ask you for your bids privately.",
+            "Your bid must be between -1 and your current currency, inclusive. -1 represents rejection.",
+            rebid_line
+        ]
+
         lines = [
             "**RULES**",
-            "This is a first-price blind auction.",
-            "Players will be queued up for consideration in a random order.",
-            "When a player is up for bidding, I will ask you for your bids privately.",
-            "Obviously, you may not bid higher than your current currency.",
-            "A captain who makes a larger nonnegative bid will secure the player at that price.",
-            "Ties in winning bids ($0 or above) are broken randomly.",
-            "If both captains bid negative amounts, the player is placed at the back of the queue."
+            "**Format:** This is a first-price blind auction.",
+            "**Ordering:** Players will be queued up for consideration in a random order."
         ]
+        lines += bidding_lines
         return "\n".join(lines)
