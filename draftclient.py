@@ -2,6 +2,7 @@ import asyncio
 import collections
 import discord
 import random
+from draftsettings import DraftSettings
 
 
 class DraftClient(discord.Client):
@@ -18,11 +19,7 @@ class DraftClient(discord.Client):
         self.captains = set([])
         self.players = None
         self.reset_state()
-        self.settings = {
-            "initial_currency": 1000,
-            "n_picks": 4,
-            "n_captains": 2
-        }
+        self.settings = DraftSettings()
 
     def reset_state(self):
         self.captains = set([])
@@ -32,32 +29,6 @@ class DraftClient(discord.Client):
     async def direct_message(user, s):
         dm_channel = await user.create_dm() if user.dm_channel is None else user.dm_channel
         return await dm_channel.send(s)
-
-    def change_setting(self, setting, value_str):
-        try:
-            if setting == "initial_currency":
-                value = int(value_str)
-                if value > 0:
-                    self.settings[setting] = value
-                    return True
-                else:
-                    return False
-            elif setting == "n_picks":
-                value = int(value_str)
-                if value > 0:
-                    self.settings[setting] = value
-                    return True
-                else:
-                    return False
-            elif setting == "n_captains":
-                value = int(value_str)
-                if value > 0:
-                    self.settings[setting] = value
-                    return True
-                else:
-                    return False
-        except ValueError:
-            return False
 
     async def on_ready(self):
         if len(self.guilds) == 0:
@@ -115,13 +86,14 @@ class DraftClient(discord.Client):
                 await message.channel.send(self.get_settings_string())
                 return
             elif command == "change_setting":
-                if self.change_setting(words[1].lower(), words[2].lower()):
+                valid, reason = self.settings.change_setting(words[1].lower(), words[2].lower())
+                if valid:
                     self.reset_state()
                     await self.react_thumbs_up(message)
                     await message.channel.send("Since settings have changed, the draft state has been reset.")
                 else:
                     await self.react_thumbs_down(message)
-                    await message.channel.send("Error: These settings changes were invalid.")
+                    await message.channel.send(f"Error: These settings changes were invalid ({reason}).")
                 return
             elif command in {"add_player", "add_players"}:
                 named_players = words[1:]
@@ -136,7 +108,7 @@ class DraftClient(discord.Client):
                         self.players.add(player)
                     else:
                         await self.react_thumbs_down(message)
-                        await message.channel.send(f"Couldn't add a player. {reason}")
+                        await message.channel.send(f"Couldn't add a player ({reason}).")
                 await message.channel.send(self.get_state_string())
                 return
             elif command == "claim_captain":
@@ -144,7 +116,7 @@ class DraftClient(discord.Client):
                 if user in self.captains:
                     await self.react_thumbs_down(message)
                     await message.channel.send("Error: You are already a captain.")
-                elif len(self.captains) >= self.settings["n_captains"]:
+                elif len(self.captains) >= self.settings.n_captains:
                     await self.react_thumbs_down(message)
                     await message.channel.send("Error: There are already enough captains.")
                 else:
@@ -156,12 +128,12 @@ class DraftClient(discord.Client):
                 if message.author not in self.captains:
                     await self.react_thumbs_down(message)
                     await message.channel.send("Error: You aren't a captain.")
-                elif len(self.captains) < self.settings["n_captains"]:
+                elif len(self.captains) < self.settings.n_captains:
                     await self.react_thumbs_down(message)
                     await message.channel.send("Error: Insufficient captains.")
-                elif len(self.players) < self.settings["n_captains"] * self.settings["n_picks"]:
+                elif len(self.players) < self.settings.n_captains * self.settings.n_picks:
                     await self.react_thumbs_down(message)
-                    min_players = self.settings["n_captains"] * self.settings["n_picks"]
+                    min_players = self.settings.n_captains * self.settings.n_picks
                     await message.channel.send(f"Error: Insufficient players to draft ({min_players} required).")
                 else:
                     await message.channel.send("Drafting has now started:\n" + self.get_state_string())
@@ -210,8 +182,8 @@ class DraftClient(discord.Client):
         return captain, bid
 
     async def execute_draft(self):
-        initial_currency = self.settings["initial_currency"]
-        n_picks = self.settings["n_picks"]
+        initial_currency = self.settings.initial_currency
+        n_picks = self.settings.n_picks
 
         # By captain
         teams = {}
@@ -243,7 +215,7 @@ class DraftClient(discord.Client):
             player = player_queue.popleft()
 
             for user in self.captains:
-                await self.direct_message(user, f'Currently bidding on: **{player}**')
+                await self.direct_message(user, f'Input a bid for: **{player}**')
                 if user not in unfinished_captains:
                     await self.direct_message(user, f"You can't bid because your team is full.")
                     continue
@@ -289,13 +261,13 @@ class DraftClient(discord.Client):
         :return: bool, string: A boolean indicating whether the name is valid. If invalid, a string explaining why.
         """
         if len(name) > 30:
-            return False, "The player's name exceeds 30 characters."
+            return False, "the player's name exceeds 20 characters"
         elif not name.isalnum():
-            return False, "The player's name contains non-alphanumeric characters."
+            return False, "the player's name contains non-alphanumeric characters"
         elif name in self.players:
-            return False, "The player's name is already added."
-        elif len(self.players) >= 50:
-            return False, f"There are already too many players ({len(self.players)})."
+            return False, "the player's name is already added"
+        elif len(self.players) >= 80:
+            return False, f"there are already too many players ({len(self.players)})"
         else:
             return True, None
 
@@ -312,11 +284,7 @@ class DraftClient(discord.Client):
         await message.add_reaction("\U0001F615")
 
     def get_settings_string(self):
-        lines = ['**SETTINGS**', "{"]
-        for key, value in self.settings.items():
-            lines.append(f"\t{key}: {value}")
-        lines.append("}")
-        return '\n'.join(lines)
+        return str(self.settings)
 
     def get_state_string(self):
         lines = ['**STATE**',
